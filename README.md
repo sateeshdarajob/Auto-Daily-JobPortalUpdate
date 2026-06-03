@@ -100,6 +100,11 @@ pip install python-dotenv
 ```
 ```
 playwright install chromium
+or
+python -m pip install --upgrade pip
+python -m pip install playwright
+python -m playwright install chromium
+python -m playwright --version
 ```
 
 > The last command downloads a mini-browser (~150 MB). It will take a minute. This is normal.
