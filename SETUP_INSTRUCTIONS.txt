@@ -1,0 +1,34 @@
+=========================================
+QUICK SETUP STEPS (Read this first!)
+=========================================
+
+1. COPY this entire "JobAutomation" folder to C:\JobAutomation\
+
+2. CREATE the credentials file:
+   - Open Notepad
+   - Paste and fill in:
+       NAUKRI_EMAIL=your_email@gmail.com
+       NAUKRI_PASSWORD=your_password
+       FOUNDIT_EMAIL=your_email@gmail.com
+       FOUNDIT_PASSWORD=your_password
+       RESUME_PATH=C:\Lappy\New-Oppo\Docs\SATEESH-KUMAR-DARA.docx
+   - Save as: C:\JobAutomation\.env
+     (Save As Type = All Files, NOT .txt)
+
+3. INSTALL packages (open Command Prompt, run each line):
+       pip install playwright python-dotenv
+       playwright install chromium
+
+4. TEST (open Command Prompt):
+       python C:\JobAutomation\naukri_upload.py
+
+5. SCHEDULE (Task Scheduler):
+   - Open Task Scheduler
+   - Create Basic Task → Daily → 08:00 → Run Program
+   - Program: C:\JobAutomation\run_upload.bat
+   - Repeat for 18:00
+
+6. CHECK results: Open C:\JobAutomation\log.txt anytime
+
+For full details, read: Job_Portal_Automation_Guide.md
+=========================================
