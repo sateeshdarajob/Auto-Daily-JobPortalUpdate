@@ -1,12 +1,12 @@
-# naukri_upload.py — FINAL CLEAN VERSION
+# naukri_upload.py — ROBUST VERSION
 #
 # FIRST TIME ONLY:  python naukri_upload.py --setup
-#   Opens browser, you log in + complete OTP, press Enter → session saved.
+#   Opens browser, you log in + complete OTP, press Enter -> session saved.
+# DEBUG (watch it):  python naukri_upload.py --debug
+# EVERY DAY:         python naukri_upload.py
 #
-# EVERY DAY (automated):  python naukri_upload.py
-#   Uses saved session, runs headless, uploads resume silently.
-#
-# SESSION EXPIRED?  Just re-run --setup (every 30-90 days).
+# Waits for the page to settle and retries with reloads until the resume
+# file input (id="attachCV") appears. Never raises — all errors are logged.
 
 import os, sys, time
 from datetime import datetime
@@ -18,97 +18,164 @@ RESUME      = os.getenv("RESUME_PATH")
 LOG_FILE    = r"C:\JobAutomation\log.txt"
 LOCK_FILE   = r"C:\JobAutomation\naukri_upload.lock"
 COOKIE_FILE = r"C:\JobAutomation\naukri_state.json"
+DEBUG_SS    = r"C:\JobAutomation\naukri_debug.png"
+PROFILE_URL = "https://www.naukri.com/mnjuser/profile"
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"]
+
+# The resume uploader (NOT the profile-photo one, which only accepts images).
+RESUME_SELECTORS = ["#attachCV", "input[type='file']:not([accept*='image'])"]
+
 
 def log(msg):
     line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] NAUKRI: {msg}"
     print(line)
-    open(LOG_FILE, "a", encoding="utf-8").write(line + "\n")
+    try: open(LOG_FILE, "a", encoding="utf-8").write(line + "\n")
+    except Exception: pass
+
 
 def lock():
     if os.path.exists(LOCK_FILE):
         if time.time() - os.path.getmtime(LOCK_FILE) < 600:
             log("SKIPPED: Already running."); return False
-    open(LOCK_FILE, "w").close(); return True
+    try: open(LOCK_FILE, "w").close()
+    except Exception: pass
+    return True
+
 
 def unlock():
     try: os.remove(LOCK_FILE)
-    except: pass
+    except Exception: pass
 
 
-# ── SETUP: run once, log in manually ────────────────────────────
+def _dismiss(pg):
+    for s in ["[class*='close']", "button:has-text('Maybe Later')",
+              "button:has-text('Skip')", "[aria-label='close']"]:
+        try: pg.click(s, timeout=1200)
+        except Exception: pass
+
+
+# -- SETUP --------------------------------------------------------
 def setup():
     print("\n[ NAUKRI SETUP ]\nA browser will open. Log in normally (email/OTP/password).")
     print("Once you reach your Naukri homepage, press Enter here.\n")
     with sync_playwright() as p:
-        ctx = p.chromium.launch(headless=False).new_context(user_agent=UA, viewport={"width":1280,"height":800})
+        ctx = p.chromium.launch(headless=False, args=ARGS).new_context(user_agent=UA, viewport={"width":1280,"height":900})
         pg  = ctx.new_page()
         pg.goto("https://www.naukri.com/nlogin/login")
         input(">>> Press Enter when fully logged in: ")
         ctx.storage_state(path=COOKIE_FILE)
-        print(f"Session saved → {COOKIE_FILE}")
-        print("Run normally: python C:\\JobAutomation\\naukri_upload.py\n")
+        print(f"Session saved -> {COOKIE_FILE}")
         ctx.browser.close()
 
 
-# ── UPLOAD: uses saved session every time ────────────────────────
-def upload():
+def _find_resume_input(pg):
+    for sel in RESUME_SELECTORS:
+        try:
+            pg.wait_for_selector(sel, state="attached", timeout=8000)
+            return sel
+        except PWTimeout:
+            continue
+    return None
+
+
+# -- ONE UPLOAD ATTEMPT -------------------------------------------
+def _attempt(p, headless, debug):
+    """Return 'OK', 'EXPIRED', or 'NOTFOUND'. Never raises."""
+    mode = "headless" if headless else "visible"
+    browser = p.chromium.launch(headless=headless, args=ARGS)
+    try:
+        ctx = browser.new_context(storage_state=COOKIE_FILE, user_agent=UA, viewport={"width":1280,"height":900})
+        ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+        pg = ctx.new_page()
+        pg.goto(PROFILE_URL, timeout=60000, wait_until="domcontentloaded")
+        try: pg.wait_for_load_state("networkidle", timeout=20000)
+        except Exception: pass
+        time.sleep(2)
+
+        if "login" in pg.url.lower():
+            return "EXPIRED"
+        log(f"Loaded ({mode}): {pg.url}")
+        _dismiss(pg)
+
+        attempts = 1 if headless else 3
+        sel = None
+        for i in range(attempts):
+            pg.mouse.wheel(0, 1500); time.sleep(1); pg.mouse.wheel(0, -1500)
+            sel = _find_resume_input(pg)
+            if sel:
+                break
+            log(f"Resume input not present yet ({mode}, try {i+1}/{attempts}).")
+            if i < attempts - 1:
+                try:
+                    pg.reload(timeout=60000, wait_until="domcontentloaded")
+                    try: pg.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception: pass
+                    _dismiss(pg)
+                except Exception: pass
+
+        if not sel:
+            if debug:
+                try: pg.screenshot(path=DEBUG_SS, full_page=True); log(f"Debug screenshot: {DEBUG_SS}")
+                except Exception: pass
+            return "NOTFOUND"
+
+        log(f"Uploading: {RESUME}")
+        pg.set_input_files(sel, RESUME)
+        log(f"File set on {sel}.")
+        time.sleep(6)
+
+        for s in ["button:has-text('Save')", "button:has-text('Upload')", "button[type='submit']"]:
+            try: pg.click(s, timeout=4000); log(f"Confirmed via: {s}"); time.sleep(3); break
+            except Exception: pass
+
+        try: ctx.storage_state(path=COOKIE_FILE)
+        except Exception: pass
+        if debug:
+            try: pg.screenshot(path=DEBUG_SS, full_page=True)
+            except Exception: pass
+        return "OK"
+    finally:
+        try: browser.close()
+        except Exception: pass
+
+
+# -- UPLOAD (orchestrator) ----------------------------------------
+def upload(debug=False):
+    if not RESUME or not os.path.exists(RESUME):
+        log(f"ERROR: RESUME_PATH missing or file not found: {RESUME}"); return
     if not os.path.exists(COOKIE_FILE):
         log("No session file. Run: python naukri_upload.py --setup"); return
-    if not lock(): sys.exit(0)
+    if not debug and not lock(): sys.exit(0)
 
     log("Starting upload (saved session)...")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        ctx     = browser.new_context(storage_state=COOKIE_FILE, user_agent=UA, viewport={"width":1280,"height":800})
-        pg      = ctx.new_page()
-        try:
-            # 1. Open profile page — no login needed
-            pg.goto("https://www.naukri.com/mnjuser/profile", timeout=30000)
-            pg.wait_for_load_state("domcontentloaded"); time.sleep(3)
-
-            if "login" in pg.url.lower():
-                log("Session expired. Run: python naukri_upload.py --setup"); return
-            log(f"Loaded: {pg.url}")
-
-            # 2. Close any popup
-            for s in ["[class*='close']","button:has-text('Maybe Later')","button:has-text('Skip')"]:
-                try: pg.click(s, timeout=1500)
-                except: pass
-
-            # 3. Scroll to resume section
-            pg.evaluate("window.scrollTo(0,600)"); time.sleep(2)
-
-            # 4. Intercept file chooser BEFORE clicking Update Resume
-            #    This is the key fix — handles the native Windows file dialog.
-            log(f"Uploading: {RESUME}")
-            with pg.expect_file_chooser(timeout=12000) as fc:
-                # Try each possible button text
-                clicked = False
-                for btn in ["text=Update Resume","text=Add Resume","text=Upload Resume",
-                            "button:has-text('Resume')","[class*='widgetHead'] button"]:
-                    try: pg.click(btn, timeout=4000); clicked = True; break
-                    except: continue
-                if not clicked:
-                    log("ERROR: Could not find the Update Resume button."); return
-            fc.value.set_files(RESUME)
-            log("File handed to browser.")
-            time.sleep(5)
-
-            # 5. Click Save if present
-            for s in ["button:has-text('Save')","button:has-text('Upload')","button[type='submit']"]:
-                try: pg.click(s, timeout=5000); log(f"Clicked: {s}"); time.sleep(3); break
-                except: pass
-
-            # 6. Save refreshed cookies
-            ctx.storage_state(path=COOKIE_FILE)
-            log("SUCCESS: Resume uploaded and session refreshed.")
-
-        except PWTimeout as e: log(f"TIMEOUT: {e}")
-        except Exception as e: log(f"ERROR: {e}")
-        finally: browser.close(); unlock()
+    try:
+        with sync_playwright() as p:
+            modes = [False] if debug else [True, False]  # try invisible first, fall back to visible
+            result = "NOTFOUND"
+            for headless in modes:
+                try:
+                    result = _attempt(p, headless, debug)
+                except Exception as e:
+                    log(f"Attempt ({'headless' if headless else 'visible'}) error: {e}")
+                    result = "ERROR"
+                if result == "OK":
+                    log("SUCCESS: Resume uploaded and session refreshed."); break
+                if result == "EXPIRED":
+                    log("Session expired. Run: python naukri_upload.py --setup"); break
+            if result not in ("OK", "EXPIRED"):
+                log("ERROR: Could not find the resume upload control (tried headless + visible).")
+    except Exception as e:
+        log(f"FATAL: {e}")
+    finally:
+        if not debug: unlock()
 
 
 if __name__ == "__main__":
-    setup() if "--setup" in sys.argv else upload()
+    if "--setup" in sys.argv:
+        setup()
+    elif "--debug" in sys.argv:
+        upload(debug=True)
+    else:
+        upload()
